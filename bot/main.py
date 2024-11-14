@@ -1,9 +1,8 @@
-import os, shutil
+import os
 import asyncio
 import traceback
 from dotenv import load_dotenv
 from pyrogram import Client, filters
-from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
 from utils.log_config import setup_logger
 
@@ -61,7 +60,7 @@ async def massage_transform(msg: Message) -> str:
 
 async def delete_file(file_path: str) -> None:
     """Удаляет все файлы в директории, где находится указанный файл.
-    
+
     Args:
         file_path (str): Путь к файлу для удаления.
     """
@@ -86,7 +85,7 @@ async def delete_file(file_path: str) -> None:
 
 async def process_file(client, message, channel_title):
     """Обрабатывает фотографии из группы и пересылает их в recipient_chat
-    
+
     Args:
         client (_type_): Клиент зарегистрированный на Telegram user
         message (Message): Сообщение из канала donor_chat
@@ -113,7 +112,6 @@ async def process_file(client, message, channel_title):
     await delete_file(full_path_image)  # Удаляем загруженное фото
 
 
-
 @client.on_message(filters.chat(chats=donor_chat))
 async def clone_content(client, message: Message) -> None:
     """
@@ -122,58 +120,35 @@ async def clone_content(client, message: Message) -> None:
         message (Message): сообщение в канале donor_chat
     return: None
     """
-    print(message.raw_text)
-    global last_media_group_id
-    print(last_media_group_id)
-    # Получаем название канала
     try:
         logger.info("Start")
+        global last_media_group_id
+        # Получаем название канала
         channel_title = message.chat.title if message.chat else "recipient channel"
-        print(channel_title)
         if message.media_group_id and message.caption:
-            print(message)
             if message.media_group_id == last_media_group_id:
-                logger.info("Пропускаем сообщение, так как он является частью медиа-группы")
+                logger.info(
+                    "Пропускаем сообщение, так как он является частью медиа-группы"
+                )
                 return
-            # обновляем ID последнего альбома            
+            # обновляем ID последнего альбома
             last_media_group_id = message.media_group_id
             logger.info(f"Новое сообщение с альбомом фото в канале:")
 
             await process_file(client, message, channel_title)
 
-            # # Обрабатываем только первое фото в альбоме
-            # media_group = await client.get_media_group(message.chat.id, message.id)
-            # for media_message in media_group:
-            #     if media_message.photo:
-            #         await process_file(client, media_message, channel_title)
-            #         break  # Завершаем после первого фото
-
-
-                # Обработка сообщений с одной фотографией
+        # Обработка сообщений с одной фотографией
         elif message.photo and not message.media_group_id:
-            logger.info(f"Новое сообщение с одной фотографией в канале: {channel_title}")
+            logger.info(
+                f"Новое сообщение с одной фотографией в канале: {channel_title}"
+            )
             await process_file(client, message, channel_title)
 
-        # async for message in client.get_chat_history(
-        #     chat_id=os.getenv("DONOR_CHANNEL_ID"),
-        #     limit=1,  # Установите желаемое количество сообщений
-        #     offset_id=-1,
-        # ):
-        #     # if message.photo and is_first_photo:
-        #     logger.info(f"Новое сообщение с фото в канале: {message.caption[:20]}")
-        #     await client.send_message(chat_id=recipient_chat, text=channel_title)
-        #     # описание текста сообщения находится в ключе "caption" длинна текста в сообщении не должна превышать 1024 символов
-
-        #     # else:
-        #     #     logger.info(f"в сообщении нет фотографии, пересылка не производится")
-
-        logger.info("End")
     except Exception as e:
         error_trace = traceback.format_exc()
         logger.error(f"Ошибка при обработке сообщений: {str(e)}\n{error_trace}")
-    # finally:
-    #     await delete_file(full_path_image)  # Удаляем загруженное фото
-
+    finally:
+        logger.info("End")
 
 
 if __name__ == "__main__":
