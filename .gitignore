@@ -163,4 +163,8 @@ cython_debug/
 
 
 *.json
-my_session.session
+*.session
+.vscode
+*.log
+*.png
+*.jpg
