@@ -146,7 +146,7 @@ async def clone_content(client, message: Message) -> None:
 
     except Exception as e:
         error_trace = traceback.format_exc()
-        logger.error(f"Ошибка при обработке сообщений: {str(e)}\n{error_trace}")
+        logger.error(f"Ошибка при обработке сообщений!: {str(e)}\n{error_trace}")
     finally:
         logger.info("End")
 
