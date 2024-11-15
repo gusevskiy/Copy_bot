@@ -125,24 +125,33 @@ async def clone_content(client, message: Message) -> None:
         global last_media_group_id
         # Получаем название канала
         channel_title = message.chat.title if message.chat else "recipient channel"
-        if message.media_group_id and message.caption:
-            if message.media_group_id == last_media_group_id:
+
+        async for message in client.get_chat_history(
+            chat_id=os.getenv("DONOR_CHANNEL_ID"),
+            limit=1,  # Установите желаемое количество сообщений
+            offset_id=-1,
+        ):
+
+            if message.media_group_id and message.caption:
+                if message.media_group_id == last_media_group_id:
+                    logger.info(
+                        "Пропускаем сообщение, так как он является частью медиа-группы"
+                    )
+                    return
+                # обновляем ID последнего альбома
+                last_media_group_id = message.media_group_id
+                logger.info(f"Новое сообщение с альбомом фото в канале:")
+
+                await process_file(client, message, channel_title)
+
+            # Обработка сообщений с одной фотографией
+            elif message.photo and not message.media_group_id:
                 logger.info(
-                    "Пропускаем сообщение, так как он является частью медиа-группы"
+                    f"Новое сообщение с одной фотографией в канале: {channel_title}"
                 )
-                return
-            # обновляем ID последнего альбома
-            last_media_group_id = message.media_group_id
-            logger.info(f"Новое сообщение с альбомом фото в канале:")
-
-            await process_file(client, message, channel_title)
-
-        # Обработка сообщений с одной фотографией
-        elif message.photo and not message.media_group_id:
-            logger.info(
-                f"Новое сообщение с одной фотографией в канале: {channel_title}"
-            )
-            await process_file(client, message, channel_title)
+                await process_file(client, message, channel_title)
+            else:
+                logger.info(f"в сообщении нет фотографии, пересылка не производится")
 
     except Exception as e:
         error_trace = traceback.format_exc()
