@@ -45,4 +45,4 @@ RECIPIENT "55555, 55555, 666666, 666666"
       RECIPIENT: "333333, 333333"
 ```
 
-[нужена подсказка](https://t.me/gusevsk1y)
+[нужна подсказка](https://t.me/gusevsk1y)
