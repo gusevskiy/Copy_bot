@@ -1,164 +1,162 @@
-import os
 import asyncio
+import logging
 import traceback
-from dotenv import load_dotenv
-from pyrogram import Client, filters
+import os
+from typing import List
+from pyrogram import Client
+from pyrogram.filters import chat
+from pyrogram.enums import MessageMediaType
 from pyrogram.types import Message
-from utils.log_config import setup_logger
+from dotenv import load_dotenv, find_dotenv
 
-logger = setup_logger()
-load_dotenv()
-client = Client(name="my_client")
-# Храним ID последней группы, чтобы избежать повторной обработки
-last_media_group_id = None
+from aiogram import Bot, Dispatcher
+from aiogram.types import (
+    BufferedInputFile,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputMediaDocument,
+    InputMediaAudio,
+)
 
-
-# Получаем путь к директории, где находится текущий файл
-current_dir = os.path.dirname(os.path.abspath(__file__))
-path_image = os.getenv("PATH_IMAGE")
-# Используем os.path.join для правильного объединения путей
-full_path_image = os.path.join(current_dir, path_image)
-logger.info(f"Полный путь к image: {full_path_image}")
-
-donor_chat = int(os.getenv("DONOR_CHANNEL_ID"))
-logger.info(f"donor_chat: {donor_chat}")
-
-recipient_chat = int(os.getenv("RECIPIENT_CHANNEL_ID"))
-logger.info(f"recipient_chat: {recipient_chat}")
+# Настройка логирования на верхнем уровне
+logging.basicConfig(
+    format="[%(levelname) 5s] [%(asctime)s] [%(name)s.%(funcName)s:%(lineno)d]: %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
 
-async def massage_transform(msg: Message) -> str:
-    """_summary_
-    Args:
-        msg (Message): Сообщение из канала донора
-    Returns:
-        str[0]: первые 980 символов из caption
-        str[1]: остаток текста, если он превышает 980 символов
-    лимит только 1024 символа, 4024 в telegram premium
+load_dotenv(find_dotenv("/home/gusevskiy/develop/copy_bots/sessions/.env"))
+
+# Константы
+donor_chats = list(map(int, os.getenv("DONOR").split(",")))
+recipient_chats = list(map(int, os.getenv("RECIPIENT").split(",")))
+file_session = str(os.getenv("SESSION"))
+BOT_TOKEN = os.getenv("TOKEN")
+logging.info(f"donor_chat; {donor_chats}")
+logging.info(f"recipient_chat; {recipient_chats}")
+logging.info(f"file_session; {file_session}")
+
+app = Client(f"/home/gusevskiy/develop/copy_bots/sessions/{file_session}")
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+processed_media_groups = set()
+
+
+async def edit_text_caption(text: str) -> str:
+    """Обрезает текст > 1024 символов."""
+    return text[:1020] if len(text) > 1020 else text
+
+
+async def download_and_prepare_media(
+    client: Client, media_group: List[Message]
+) -> List:
+    """Скачивает медиа и формирует список InputMedia."""
+    tasks = [client.download_media(msg, in_memory=True) for msg in media_group]
+    captions = [
+        await edit_text_caption(msg.caption) if msg.caption else ""
+        for msg in media_group
+    ]
+    types = [
+        "photo" if msg.photo else "video" if msg.video else "audio" if msg.audio else "document"
+        for msg in media_group
+    ]
+    files = await asyncio.gather(*tasks)
+
+    media_list = []
+    for file, caption, type_ in zip(files, captions, types):
+        file.seek(0)
+        input_file = BufferedInputFile(file.read(), filename=f"{type_}.file")
+        if type_ == "photo":
+            media_list.append(InputMediaPhoto(
+                media=input_file, caption=caption))
+        elif type_ == "video":
+            media_list.append(InputMediaVideo(
+                media=input_file, caption=caption))
+        elif type_ == "document":
+            media_list.append(InputMediaDocument(
+                media=input_file, caption=caption))
+        elif type_ == "audio":
+            media_list.append(InputMediaAudio(
+                media=input_file, caption=caption))
+    return media_list
+
+
+async def handle_single_media(client: Client, message: Message, recipient_chat) -> None:
     """
-    msg = vars(msg)
-    len_caption = len(msg.get("caption"))
-    logger.info(f"len caption: {len_caption}")
-
-    if len_caption < 980:
-        msg_caption = (
-            msg.get("caption") + "\n\n" + "Этот текст был изменен при пересылке!!!"
-        )
-        msg_text = None
-    else:
-        split_text = msg.get("caption").split("\n\n")
-        msg_caption = split_text[0] + "\n\n" + "Этот текст был изменен при пересылке!!!"
-        msg_text = (
-            "\n".join(split_text[1:])
-            + "\n\n"
-            + " Этот текст был изменен при пересылке!!!"
-        )
-
-    logger.info(f"Текст изменен!!")
-    return msg_caption, msg_text
-
-
-async def delete_file(file_path: str) -> None:
-    """Удаляет все файлы в директории, где находится указанный файл.
-
-    Args:
-        file_path (str): Путь к файлу для удаления.
+    Пересылает одиночные медиа-сообщения.
     """
-    # Проверяем, есть ли путь к папке
-    if os.path.isfile(file_path):
-        path_dir = os.path.dirname(file_path)
-        logger.info(f"Путь к директории: {path_dir}")
+    file = await client.download_media(message, in_memory=True)
+    file.seek(0)
+    caption = await edit_text_caption(message.caption) if message.caption else ""
 
-        for filename in os.listdir(path_dir):
-            full_path = os.path.join(path_dir, filename)
-            try:
-                # Удаляем файл, если это действительно файл
-                if os.path.isfile(full_path):
-                    await asyncio.to_thread(os.remove, full_path)
-                    logger.info(f"Файл удален: {full_path}")
-                    await asyncio.sleep(1)  # которкая пауза чтобы избежать блокировки
-            except Exception as e:
-                logger.error(f"Ошибка при удалении файла: {full_path} - {e}")
-    else:
-        logger.error(f"Файл не найден: {file_path}")
+    input_file = BufferedInputFile(file.read(), filename=None)
+    if message.photo:
+        await bot.send_photo(recipient_chat, input_file, caption=caption)
+    elif message.video:
+        await bot.send_video(recipient_chat, input_file, caption=caption)
+    elif message.voice:
+        await bot.send_audio(recipient_chat, input_file, caption=caption)
+    elif message.video_note:
+        await bot.send_video_note(recipient_chat, input_file)
+    elif message.document:
+        await bot.send_document(recipient_chat, input_file, caption=caption)
+    logging.info("Media sent")
 
 
-async def process_file(client, message, channel_title):
-    """Обрабатывает фотографии из группы и пересылает их в recipient_chat
-
-    Args:
-        client (_type_): Клиент зарегистрированный на Telegram user
-        message (Message): Сообщение из канала donor_chat
-        channel_title (str): Название канала donor_chat
+@app.on_message(chat(donor_chats))
+async def handle_message(client: Client, message: Message) -> None:
     """
-    logger.info(f"Обрабатываем фотографии из группы: {channel_title}")
-    msg_caption, msg_text = await massage_transform(message)
-    # Загружаем фото
-    file_path = await message.download(file_name=full_path_image)
-    logger.info(f"Фото загружено: {file_path}")
-    await client.send_message(chat_id=recipient_chat, text=channel_title)
-    await client.send_photo(
-        chat_id=recipient_chat,
-        photo=full_path_image,
-        caption=msg_caption,
-    )
-    if msg_text is not None:
-        await client.send_message(
-            chat_id=recipient_chat,
-            text=msg_text,
-        )
-    logger.info(f"Сообщение переслано в канал: {recipient_chat}")
-
-    await delete_file(full_path_image)  # Удаляем загруженное фото
-
-
-@client.on_message(filters.chat(chats=donor_chat))
-async def clone_content(client, message: Message) -> None:
-    """
-    Args:
-        client (_type_): Клиент зарегистрированный на Telegram user
-        message (Message): сообщение в канале donor_chat
-    return: None
+    Основной обработчик сообщений.
     """
     try:
-        logger.info("Start")
-        global last_media_group_id
-        # Получаем название канала
-        channel_title = message.chat.title if message.chat else "recipient channel"
+        #индекс в списке доноров
+        donor_index = donor_chats.index(message.chat.id)
+        # название чата из которого пришло сообщение
+        donor_chat_id = message.chat.id
+        donor_title = message.chat.title
+        # сопоставляем по индексу в списке чат для отправки
+        recipient_chat = recipient_chats[donor_index]
+        
+        logging.info(
+            f"Сообщение из чата {donor_chat_id}: {donor_title or ''} -> {recipient_chat}"
+        )
 
-        async for message in client.get_chat_history(
-            chat_id=os.getenv("DONOR_CHANNEL_ID"),
-            limit=1,  # Установите желаемое количество сообщений
-            offset_id=-1,
-        ):
+        # работаем с альбомом
+        if message.media_group_id:
+            print("media_group")
+            if message.media_group_id in processed_media_groups:
+                return
 
-            if message.media_group_id and message.caption:
-                if message.media_group_id == last_media_group_id:
-                    logger.info(
-                        "Пропускаем сообщение, так как он является частью медиа-группы"
-                    )
-                    return
-                # обновляем ID последнего альбома
-                last_media_group_id = message.media_group_id
-                logger.info(f"Новое сообщение с альбомом фото в канале:")
+            processed_media_groups.add(message.media_group_id)
+            media_group = await client.get_media_group(message.chat.id, message.id)
+            media_to_send = await download_and_prepare_media(client, media_group)
+            # Отправляем Альбом
+            await bot.send_media_group(chat_id=recipient_chat, media=media_to_send)
+            logging.info("Mediagroup send")
 
-                await process_file(client, message, channel_title)
+        # работает с одним носителем
+        elif message.media in [
+            MessageMediaType.PHOTO,
+            MessageMediaType.VIDEO,
+            MessageMediaType.DOCUMENT,
+            MessageMediaType.VOICE,
+            MessageMediaType.VIDEO_NOTE,
+        ]:
+            await handle_single_media(client, message, recipient_chat)
 
-            # Обработка сообщений с одной фотографией
-            elif message.photo and not message.media_group_id:
-                logger.info(
-                    f"Новое сообщение с одной фотографией в канале: {channel_title}"
-                )
-                await process_file(client, message, channel_title)
-            else:
-                logger.info(f"в сообщении нет фотографии, пересылка не производится")
-
+        # работаем с одиночным текстом или ссылкой на что то.
+        elif message.text or message.media == MessageMediaType.WEB_PAGE:
+            print("text")
+            text = await edit_text_caption(message.text) if message.text else ""
+            link = message.web_page.url if message.web_page else ""
+            await bot.send_message(recipient_chat, f"{text}{link}")
+            logging.info("Text send")
     except Exception as e:
-        error_trace = traceback.format_exc()
-        logger.error(f"Ошибка при обработке сообщений!: {str(e)}\n{error_trace}")
-    finally:
-        logger.info("End")
+        # Получение полного traceback
+        logging.error(f"Error:\n{traceback.format_exc()}")
 
 
 if __name__ == "__main__":
-    asyncio.run(client.run())
+    app.run()

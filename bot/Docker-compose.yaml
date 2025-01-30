@@ -1,0 +1,23 @@
+services:
+  two_bots:
+    build:
+      context: ./
+    container_name: two_bots
+    # Настройки логирования
+    logging:
+      driver: "json-file"
+      options:
+        # Макс обьем одного файла
+        max-size: "10m"
+        # Всего файлов, четвертый всегда удаляется
+        max-file: "3"
+    environment:
+      # Канал на который подписан владелец session
+      DONOR: "111111111111, 22222222222222222"
+      SESSION: "8877_2"
+      # Токен для aiogram3
+      TOKEN: "TOKENTOKENTOKENTOKENTOKENTOKENTOKENTOKENTOKEN"
+      # Чат в который шлет msg бот aiogram3
+      RECIPIENT: "3333333333333333, 3333333333333333"
+    command: python3 main.py
+    restart: always
