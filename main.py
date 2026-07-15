@@ -3,7 +3,7 @@ import logging
 import traceback
 import os
 from typing import List
-from pyrogram import Client
+from pyrogram import Client, idle
 from pyrogram.filters import chat
 from pyrogram.enums import MessageMediaType
 from pyrogram.types import Message
@@ -220,9 +220,41 @@ async def handle_message(client: Client, message: Message) -> None:
         logging.error(f"Error:\n{traceback.format_exc()}")
 
 
+async def check_donor_chats() -> None:
+    """
+    Запрашивает последнее сообщение из каждого DONOR-чата при старте.
+    Если аккаунт удалён/кикнут из чата, get_chat_history упадёт с исключением -
+    это сразу видно в логах при запуске, не дожидаясь первого пропущенного поста.
+    """
+    for chat_id in donor_chats:
+        try:
+            last_message = None
+            async for message in app.get_chat_history(chat_id, limit=1):
+                last_message = message
+                break
+            if last_message:
+                logging.info(
+                    f"[STARTUP CHECK] chat_id={chat_id}: OK, "
+                    f"последнее сообщение id={last_message.id} от {last_message.date.isoformat()}"
+                )
+            else:
+                logging.warning(f"[STARTUP CHECK] chat_id={chat_id}: доступен, но история пуста")
+        except Exception:
+            logging.error(
+                f"[STARTUP CHECK] chat_id={chat_id}: не удалось получить историю "
+                f"(возможно, аккаунт удалён/кикнут из чата)\n{traceback.format_exc()}"
+            )
+
+
+async def main() -> None:
+    async with app:
+        await check_donor_chats()
+        await idle()
+
+
 if __name__ == "__main__":
     # app.run() держит соединение и сам переподключается при обрывах связи.
     # Но если сессия отозвана/невалидна (см. тест сессии выше) или сеть недоступна
     # намертво - процесс упадёт уже тут, до входа в handle_message, и это будет
     # видно в самом начале логов контейнера (docker logs two_bots).
-    app.run()
+    app.run(main())
