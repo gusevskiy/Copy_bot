@@ -233,9 +233,11 @@ async def check_donor_chats() -> None:
                 last_message = message
                 break
             if last_message:
+                preview = (last_message.text or last_message.caption or "")[:10]
                 logging.info(
                     f"[STARTUP CHECK] chat_id={chat_id}: OK, "
-                    f"последнее сообщение id={last_message.id} от {last_message.date.isoformat()}"
+                    f"последнее сообщение id={last_message.id} от {last_message.date.isoformat()} "
+                    f"text='{preview}'"
                 )
             else:
                 logging.warning(f"[STARTUP CHECK] chat_id={chat_id}: доступен, но история пуста")
