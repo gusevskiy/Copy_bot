@@ -101,11 +101,7 @@ async def download_and_prepare_media(
                 media_list.append(InputMediaVideo(media=input_file, caption=caption))
             elif type_ == "document":
                 media_list.append(InputMediaDocument(media=input_file, caption=caption))
-            elif type == "audio":
-                # БАГ: сравнение идёт со встроенным builtin `type`, а не с переменной `type_`.
-                # Это условие никогда не истинно, поэтому аудио-файлы внутри альбома
-                # молча выпадают из media_list (скачиваются, но не отправляются).
-                # Должно быть: elif type_ == "audio":
+            elif type_ == "audio":
                 media_list.append(InputMediaAudio(media=input_file, caption=caption))
     finally:
         # Закрываем BytesIO-объекты, чтобы не копить память, даже если отправка упала.
@@ -141,6 +137,13 @@ async def handle_single_media(
         await bot.send_video_note(recipient_chat, input_file)
     elif message.document:
         await bot.send_document(recipient_chat, input_file, caption=caption)
+    elif message.audio:
+        await bot.send_audio(recipient_chat, input_file, caption=caption)
+    elif message.animation:
+        await bot.send_animation(recipient_chat, input_file, caption=caption)
+    elif message.sticker:
+        # У стикеров нет caption - Telegram его не поддерживает для этого типа.
+        await bot.send_sticker(recipient_chat, input_file)
     logging.info("Media sent")
 
 
@@ -191,6 +194,9 @@ async def handle_message(client: Client, message: Message) -> None:
             MessageMediaType.DOCUMENT,
             MessageMediaType.VOICE,
             MessageMediaType.VIDEO_NOTE,
+            MessageMediaType.AUDIO,
+            MessageMediaType.ANIMATION,
+            MessageMediaType.STICKER,
         ]:
             # передаем, отправляет там
             await handle_single_media(client, message, recipient_chat, donor_title)
@@ -226,13 +232,22 @@ async def check_donor_chats() -> None:
     Если аккаунт удалён/кикнут из чата, get_chat_history упадёт с исключением -
     это сразу видно в логах при запуске, не дожидаясь первого пропущенного поста.
     """
+    # Проверяем каждый донор-чат по очереди, а не параллельно (asyncio.gather) -
+    # чтобы одна медленная/зависшая проверка не блокировала остальные молча,
+    # и чтобы порядок логов совпадал с порядком чатов в DONOR.
     for chat_id in donor_chats:
         try:
+            # get_chat_history - асинхронный генератор, а не список, поэтому даже
+            # при limit=1 нужен async for; получив первое (оно же единственное)
+            # сообщение, сразу выходим из цикла через break.
             last_message = None
             async for message in app.get_chat_history(chat_id, limit=1):
                 last_message = message
                 break
+
             if last_message:
+                # У медиа-сообщений текста нет - там текст лежит в caption.
+                # Берём что есть, обрезаем до 10 символов для превью в логе.
                 preview = (last_message.text or last_message.caption or "")[:10]
                 logging.info(
                     f"[STARTUP CHECK] chat_id={chat_id}: OK, "
@@ -240,8 +255,15 @@ async def check_donor_chats() -> None:
                     f"text='{preview}'"
                 )
             else:
+                # Чат доступен (исключения не было), но в нём вообще нет сообщений -
+                # редкий случай, отличаем его от "нас удалили" отдельным уровнем лога.
                 logging.warning(f"[STARTUP CHECK] chat_id={chat_id}: доступен, но история пуста")
         except Exception:
+            # Основной сценарий, ради которого всё это писалось: если юзербота
+            # выгнали/удалили из чата (или он вообще не имеет к нему доступа),
+            # get_chat_history бросит исключение именно тут - и это будет видно
+            # в самом начале логов при старте контейнера, а не когда донор
+            # что-то опубликует и пересылка тихо не сработает.
             logging.error(
                 f"[STARTUP CHECK] chat_id={chat_id}: не удалось получить историю "
                 f"(возможно, аккаунт удалён/кикнут из чата)\n{traceback.format_exc()}"
