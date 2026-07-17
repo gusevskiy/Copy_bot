@@ -14,7 +14,7 @@ services:
       # 2) обновления, которые Pyrogram пишет в sqlite-файл на лету, переживают
       #    пересоздание контейнера (docker compose up --build / down+up), а не
       #    откатываются к версии, вшитой в образ при последней сборке.
-      - ./8877_2.session:/app/8877_2.session
+      - ./${SESSION}.session:/app/${SESSION}.session
     # Секреты и списки чатов вынесены в .env (лежит рядом, в .gitignore/.dockerignore),
     # чтобы TOKEN и id чатов не оседали в git-истории этого файла.
     env_file:

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # find_dotenv тут ничего не найдёт. В докере это не страшно, т.к.
 # переменные приходят напрямую из docker-compose "environment:", но если
 # запускать main.py руками (не в контейнере) на сервере, .env не подхватится.
-load_dotenv(find_dotenv("/home/gusevskiy/develop/copy_bots/sessions/.env"))
+load_dotenv()
 
 # Константы, читаются из переменных окружения (см. docker-compose.yml -> environment:)
 donor_chats = list(map(int, os.getenv("DONOR").split(",")))       # id чатов-доноров, откуда читаем сообщения
@@ -272,6 +272,23 @@ async def check_donor_chats() -> None:
 
 async def main() -> None:
     async with app:
+        me = await bot.get_me()
+        logging.info(f"[BOT CHECK] Токен принадлежит боту: @{me.username} (id={me.id})")
+
+        for chat_id in recipient_chats:
+            try:
+                chat = await bot.get_chat(chat_id)
+                logging.info(f"[RECIPIENT CHECK] {chat_id}: OK -> {chat.title}")
+            except Exception as e:
+                logging.error(f"[RECIPIENT CHECK] {chat_id}: ОШИБКА -> {e}")
+
+        # Без этого Pyrogram не инициализирует локальное состояние обновлений (pts)
+        # по каналам/супергруппам - get_chat_history после этого всё равно работает
+        # (это прямой запрос), а вот live-апдейты в on_message для них молча не приходят.
+        # Для приватных чатов эта синхронизация не нужна, поэтому личка и работала.
+        async for _ in app.get_dialogs():
+            pass
+
         await check_donor_chats()
         await idle()
 
