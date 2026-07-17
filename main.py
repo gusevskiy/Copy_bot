@@ -6,17 +6,15 @@ from typing import List
 from pyrogram import Client, idle
 from pyrogram.filters import chat
 from pyrogram.enums import MessageMediaType
-from pyrogram.types import Message
-from dotenv import load_dotenv, find_dotenv
-from datetime import datetime, timezone
-from aiogram import Bot, Dispatcher
-from aiogram.types import (
-    BufferedInputFile,
+from pyrogram.types import (
+    Message,
     InputMediaPhoto,
     InputMediaVideo,
     InputMediaDocument,
     InputMediaAudio,
 )
+from dotenv import load_dotenv
+from datetime import datetime, timezone
 
 # Настройка логирования на верхнем уровне
 logging.basicConfig(
@@ -25,34 +23,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# Путь захардкожен под dev-машину и на сервере не существует, поэтому
-# find_dotenv тут ничего не найдёт. В докере это не страшно, т.к.
-# переменные приходят напрямую из docker-compose "environment:", но если
-# запускать main.py руками (не в контейнере) на сервере, .env не подхватится.
 load_dotenv()
 
-# Константы, читаются из переменных окружения (см. docker-compose.yml -> environment:)
+# Константы, читаются из переменных окружения (см. docker-compose.yaml -> env_file)
 donor_chats = list(map(int, os.getenv("DONOR").split(",")))       # id чатов-доноров, откуда читаем сообщения
 recipient_chats = list(map(int, os.getenv("RECIPIENT").split(",")))  # id чатов-получателей, по индексу совпадает с donor_chats
 file_session = str(os.getenv("SESSION"))  # имя .session файла (userbot-аккаунт), без расширения
-BOT_TOKEN = os.getenv("TOKEN")            # токен обычного Telegram-бота (aiogram), через него идёт постинг
 logging.info(f"donor_chats: {donor_chats}")
 logging.info(f"recipient_chats: {recipient_chats}")
 logging.info(f"file_session; {file_session}")
 
-# Клиент-userbot (Pyrogram) - читает сообщения из donor_chats.
-# Использует уже существующий .session файл (авторизация не нужна, если он валиден).
+# Единственный клиент (Pyrogram-юзербот): и читает donor_chats, и пересылает в
+# recipient_chats. Отдельного bot-аккаунта нет - не нужно добавлять его в каждый
+# получатель, нет проблем с "chat not found"/privacy mode, свойственных Bot API.
 app = Client(
     f"{file_session}",
     workers=4,  # Параллельная обработка
     sleep_threshold=30,  # Терпим лаги до 30 сек
 )
-# Обычный бот (aiogram) - именно он публикует контент в recipient_chats.
-# Если TOKEN невалиден/просрочен, Bot(token=...) упадёт уже на этой строке,
-# т.е. процесс не запустится вообще (это будет видно в самом начале логов).
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 
 # id медиа-групп (альбомов), которые уже обработали - чтобы не пересылать
 # один и тот же альбом повторно (Pyrogram шлёт по одному update на каждое
@@ -62,8 +50,8 @@ processed_media_groups = set()
 
 async def edit_text_caption(text: str) -> str:
     """Обрезает текст > 1024 символов."""
-    # Telegram Bot API не даёт caption длиннее 1024 символов (у обычных ботов),
-    # а Pyrogram-юзербот мог скачать текст/подпись с премиум-аккаунта, где лимит больше (4096).
+    # Telegram не даёт caption длиннее 1024 символов, а Pyrogram-юзербот мог
+    # скачать текст/подпись с премиум-аккаунта, где лимит больше (4096).
     return text[:1020] if len(text) > 1020 else text
 
 
@@ -92,17 +80,17 @@ async def download_and_prepare_media(
 
     media_list = []
     try:
+        # file - BytesIO с уже проставленным Pyrogram'ом атрибутом .name,
+        # его можно передавать в InputMedia* напрямую, без обёрток.
         for file, caption, type_ in zip(files, captions, types):
-            file.seek(0)
-            input_file = BufferedInputFile(file.read(), filename=f"{type_}.file")
             if type_ == "photo":
-                media_list.append(InputMediaPhoto(media=input_file, caption=caption))
+                media_list.append(InputMediaPhoto(media=file, caption=caption))
             elif type_ == "video":
-                media_list.append(InputMediaVideo(media=input_file, caption=caption))
+                media_list.append(InputMediaVideo(media=file, caption=caption))
             elif type_ == "document":
-                media_list.append(InputMediaDocument(media=input_file, caption=caption))
+                media_list.append(InputMediaDocument(media=file, caption=caption))
             elif type_ == "audio":
-                media_list.append(InputMediaAudio(media=input_file, caption=caption))
+                media_list.append(InputMediaAudio(media=file, caption=caption))
     finally:
         # Закрываем BytesIO-объекты, чтобы не копить память, даже если отправка упала.
         for file in files:
@@ -118,32 +106,28 @@ async def handle_single_media(
     """
     Пересылает одиночные медиа-сообщения.
     """
-    # Скачиваем файл userbot-клиентом (Pyrogram) и тут же заливаем его через bot-клиента (aiogram),
-    # т.е. файл проходит транзитом через память процесса, а не пересылается напрямую в Telegram.
     file = await client.download_media(message, in_memory=True)
-    file.seek(0)
     caption = await edit_text_caption(message.caption) if message.caption else ""
 
-    input_file = BufferedInputFile(file.read(), filename=None)
     if message.photo:
-        await bot.send_photo(recipient_chat, input_file, caption=caption)
+        await client.send_photo(recipient_chat, file, caption=caption)
     elif message.video:
-        await bot.send_video(recipient_chat, input_file, caption=caption)
+        await client.send_video(recipient_chat, file, caption=caption)
     elif message.voice:
         # Голосовые сообщения (voice) шлём как send_audio, а не send_voice -
         # осознанный выбор или недосмотр, но именно так их получит подписчик.
-        await bot.send_audio(recipient_chat, input_file, caption=caption)
+        await client.send_audio(recipient_chat, file, caption=caption)
     elif message.video_note:
-        await bot.send_video_note(recipient_chat, input_file)
+        await client.send_video_note(recipient_chat, file)
     elif message.document:
-        await bot.send_document(recipient_chat, input_file, caption=caption)
+        await client.send_document(recipient_chat, file, caption=caption)
     elif message.audio:
-        await bot.send_audio(recipient_chat, input_file, caption=caption)
+        await client.send_audio(recipient_chat, file, caption=caption)
     elif message.animation:
-        await bot.send_animation(recipient_chat, input_file, caption=caption)
+        await client.send_animation(recipient_chat, file, caption=caption)
     elif message.sticker:
         # У стикеров нет caption - Telegram его не поддерживает для этого типа.
-        await bot.send_sticker(recipient_chat, input_file)
+        await client.send_sticker(recipient_chat, file)
     logging.info("Media sent")
 
 
@@ -184,7 +168,7 @@ async def handle_message(client: Client, message: Message) -> None:
             media_group = await client.get_media_group(message.chat.id, message.id)
             media_to_send = await download_and_prepare_media(client, media_group)
             # Отправляем Альбом
-            await bot.send_media_group(chat_id=recipient_chat, media=media_to_send)
+            await client.send_media_group(recipient_chat, media_to_send)
             logging.info("Mediagroup send")
 
         # работает с одним носителем
@@ -205,7 +189,7 @@ async def handle_message(client: Client, message: Message) -> None:
         elif message.text or message.media == MessageMediaType.WEB_PAGE:
             text = await edit_text_caption(message.text) if message.text else ""
             link = message.web_page.url if message.web_page else ""
-            await bot.send_message(recipient_chat, f"{text}{link}")
+            await client.send_message(recipient_chat, f"{text}{link}")
             logging.info("Text send")
 
         # Просто диагностика задержки доставки - на случай, если сообщения
@@ -232,22 +216,14 @@ async def check_donor_chats() -> None:
     Если аккаунт удалён/кикнут из чата, get_chat_history упадёт с исключением -
     это сразу видно в логах при запуске, не дожидаясь первого пропущенного поста.
     """
-    # Проверяем каждый донор-чат по очереди, а не параллельно (asyncio.gather) -
-    # чтобы одна медленная/зависшая проверка не блокировала остальные молча,
-    # и чтобы порядок логов совпадал с порядком чатов в DONOR.
     for chat_id in donor_chats:
         try:
-            # get_chat_history - асинхронный генератор, а не список, поэтому даже
-            # при limit=1 нужен async for; получив первое (оно же единственное)
-            # сообщение, сразу выходим из цикла через break.
             last_message = None
             async for message in app.get_chat_history(chat_id, limit=1):
                 last_message = message
                 break
 
             if last_message:
-                # У медиа-сообщений текста нет - там текст лежит в caption.
-                # Берём что есть, обрезаем до 10 символов для превью в логе.
                 preview = (last_message.text or last_message.caption or "")[:10]
                 logging.info(
                     f"[STARTUP CHECK] chat_id={chat_id}: OK, "
@@ -255,47 +231,47 @@ async def check_donor_chats() -> None:
                     f"text='{preview}'"
                 )
             else:
-                # Чат доступен (исключения не было), но в нём вообще нет сообщений -
-                # редкий случай, отличаем его от "нас удалили" отдельным уровнем лога.
                 logging.warning(f"[STARTUP CHECK] chat_id={chat_id}: доступен, но история пуста")
         except Exception:
-            # Основной сценарий, ради которого всё это писалось: если юзербота
-            # выгнали/удалили из чата (или он вообще не имеет к нему доступа),
-            # get_chat_history бросит исключение именно тут - и это будет видно
-            # в самом начале логов при старте контейнера, а не когда донор
-            # что-то опубликует и пересылка тихо не сработает.
             logging.error(
                 f"[STARTUP CHECK] chat_id={chat_id}: не удалось получить историю "
                 f"(возможно, аккаунт удалён/кикнут из чата)\n{traceback.format_exc()}"
             )
 
 
+async def check_recipient_chats() -> None:
+    """
+    Проверяет при старте, что юзербот имеет доступ к каждому RECIPIENT-чату -
+    то есть может в него постить. Без TOKEN/отдельного бота эта проверка
+    делается тем же клиентом, что и check_donor_chats.
+    """
+    for chat_id in recipient_chats:
+        try:
+            recipient = await app.get_chat(chat_id)
+            logging.info(f"[RECIPIENT CHECK] {chat_id}: OK -> {recipient.title or recipient.first_name}")
+        except Exception:
+            logging.error(
+                f"[RECIPIENT CHECK] {chat_id}: недоступен\n{traceback.format_exc()}"
+            )
+
+
 async def main() -> None:
     async with app:
-        me = await bot.get_me()
-        logging.info(f"[BOT CHECK] Токен принадлежит боту: @{me.username} (id={me.id})")
-
-        for chat_id in recipient_chats:
-            try:
-                chat = await bot.get_chat(chat_id)
-                logging.info(f"[RECIPIENT CHECK] {chat_id}: OK -> {chat.title}")
-            except Exception as e:
-                logging.error(f"[RECIPIENT CHECK] {chat_id}: ОШИБКА -> {e}")
-
         # Без этого Pyrogram не инициализирует локальное состояние обновлений (pts)
         # по каналам/супергруппам - get_chat_history после этого всё равно работает
         # (это прямой запрос), а вот live-апдейты в on_message для них молча не приходят.
-        # Для приватных чатов эта синхронизация не нужна, поэтому личка и работала.
+        # Для приватных чатов эта синхронизация не нужна.
         async for _ in app.get_dialogs():
             pass
 
         await check_donor_chats()
+        await check_recipient_chats()
         await idle()
 
 
 if __name__ == "__main__":
     # app.run() держит соединение и сам переподключается при обрывах связи.
-    # Но если сессия отозвана/невалидна (см. тест сессии выше) или сеть недоступна
-    # намертво - процесс упадёт уже тут, до входа в handle_message, и это будет
-    # видно в самом начале логов контейнера (docker logs two_bots).
+    # Но если сессия отозвана/невалидна или сеть недоступна намертво - процесс
+    # упадёт уже тут, до входа в handle_message, и это будет видно в самом
+    # начале логов контейнера (docker logs two_bots).
     app.run(main())
