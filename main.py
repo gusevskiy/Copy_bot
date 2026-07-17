@@ -5,7 +5,6 @@ import os
 from typing import List
 from pyrogram import Client, idle
 from pyrogram.filters import chat
-from pyrogram.handlers import RawUpdateHandler
 from pyrogram.enums import MessageMediaType
 from pyrogram.types import (
     Message,
@@ -22,8 +21,6 @@ logging.basicConfig(
     format="[%(levelname) 5s] [%(asctime)s] [%(name)s.%(funcName)s:%(lineno)d]: %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
-
 load_dotenv()
 
 # Константы, читаются из переменных окружения (см. docker-compose.yaml -> env_file)
@@ -49,27 +46,6 @@ app = Client(
 processed_media_groups = set()
 
 
-# ВРЕМЕННЫЙ диагностический хендлер - логирует сырые апдейты от Telegram, но
-# только те, что относятся к DONOR-каналам (иначе тонет в апдейтах от ВСЕХ
-# каналов, где вообще состоит аккаунт). Удалить после диагностики.
-# У raw-апдейтов канал приходит как "raw" channel_id (без -100 и минуса) -
-# переводим маркированные Bot-API id из donor_chats в этот формат для сверки.
-DONOR_RAW_CHANNEL_IDS = {
-    -chat_id - 10**12 for chat_id in donor_chats if chat_id <= -1000000000000
-}
-
-
-async def raw_update_logger(client: Client, update, users, chats):
-    channel_id = getattr(getattr(update, "message", None), "peer_id", None)
-    channel_id = getattr(channel_id, "channel_id", None)
-    if channel_id is None or channel_id not in DONOR_RAW_CHANNEL_IDS:
-        return
-    logging.info(f"[RAW UPDATE] {type(update).__name__}: {update}")
-
-
-app.add_handler(RawUpdateHandler(raw_update_logger), group=-1)
-
-
 async def edit_text_caption(text: str) -> str:
     """Обрезает текст > 1024 символов."""
     # Telegram не даёт caption длиннее 1024 символов, а Pyrogram-юзербот мог
@@ -79,8 +55,8 @@ async def edit_text_caption(text: str) -> str:
 
 async def download_and_prepare_media(
     client: Client, media_group: List[Message]
-) -> List:
-    """Скачивает медиа и формирует список InputMedia."""
+) -> tuple:
+    """Скачивает медиа и формирует список InputMedia. Возвращает (media_list, files)."""
     # Качаем все файлы альбома в память (in_memory=True) параллельно через asyncio.gather ниже.
     tasks = [client.download_media(msg, in_memory=True) for msg in media_group]
     captions = [
@@ -101,29 +77,26 @@ async def download_and_prepare_media(
     files = await asyncio.gather(*tasks)
 
     media_list = []
-    try:
-        # file - BytesIO с уже проставленным Pyrogram'ом атрибутом .name,
-        # его можно передавать в InputMedia* напрямую, без обёрток.
-        for file, caption, type_ in zip(files, captions, types):
-            if type_ == "photo":
-                media_list.append(InputMediaPhoto(media=file, caption=caption))
-            elif type_ == "video":
-                media_list.append(InputMediaVideo(media=file, caption=caption))
-            elif type_ == "document":
-                media_list.append(InputMediaDocument(media=file, caption=caption))
-            elif type_ == "audio":
-                media_list.append(InputMediaAudio(media=file, caption=caption))
-    finally:
-        # Закрываем BytesIO-объекты, чтобы не копить память, даже если отправка упала.
-        for file in files:
-            if file:
-                file.close()
+    # file - BytesIO с уже проставленным Pyrogram'ом атрибутом .name, его можно
+    # передавать в InputMedia* напрямую, без обёрток. Закрывать файлы здесь
+    # нельзя - send_media_group читает их позже, уже после возврата из этой
+    # функции (иначе ловим "I/O operation on closed file"). Закрытие - на
+    # вызывающей стороне, после фактической отправки.
+    for file, caption, type_ in zip(files, captions, types):
+        if type_ == "photo":
+            media_list.append(InputMediaPhoto(media=file, caption=caption))
+        elif type_ == "video":
+            media_list.append(InputMediaVideo(media=file, caption=caption))
+        elif type_ == "document":
+            media_list.append(InputMediaDocument(media=file, caption=caption))
+        elif type_ == "audio":
+            media_list.append(InputMediaAudio(media=file, caption=caption))
 
-    return media_list
+    return media_list, files
 
 
 async def handle_single_media(
-    client: Client, message: Message, recipient_chat, donor_title
+    client: Client, message: Message, recipient_chat
 ) -> None:
     """
     Пересылает одиночные медиа-сообщения.
@@ -188,10 +161,18 @@ async def handle_message(client: Client, message: Message) -> None:
 
             processed_media_groups.add(message.media_group_id)
             media_group = await client.get_media_group(message.chat.id, message.id)
-            media_to_send = await download_and_prepare_media(client, media_group)
-            # Отправляем Альбом
-            await client.send_media_group(recipient_chat, media_to_send)
-            logging.info("Mediagroup send")
+            media_to_send, files = await download_and_prepare_media(client, media_group)
+            try:
+                # Отправляем Альбом
+                await client.send_media_group(recipient_chat, media_to_send)
+                logging.info("Mediagroup send")
+            finally:
+                # Закрываем BytesIO-объекты уже после отправки, чтобы не копить
+                # память, но и не закрыть их раньше, чем send_media_group успеет
+                # их прочитать.
+                for file in files:
+                    if file:
+                        file.close()
 
         # работает с одним носителем
         elif message.media in [
@@ -204,8 +185,7 @@ async def handle_message(client: Client, message: Message) -> None:
             MessageMediaType.ANIMATION,
             MessageMediaType.STICKER,
         ]:
-            # передаем, отправляет там
-            await handle_single_media(client, message, recipient_chat, donor_title)
+            await handle_single_media(client, message, recipient_chat)
 
         # работаем с одиночным текстом или ссылкой на что то.
         elif message.text or message.media == MessageMediaType.WEB_PAGE:
@@ -216,8 +196,13 @@ async def handle_message(client: Client, message: Message) -> None:
 
         # Просто диагностика задержки доставки - на случай, если сообщения
         # обрабатываются с большим опозданием (например из-за FloodWait или очереди).
+        # Kurigram отдаёт message.date как naive datetime (без tzinfo), в
+        # отличие от pyrotgfork/Pyrogram - приводим к aware UTC перед вычитанием.
+        message_date = message.date
+        if message_date.tzinfo is None:
+            message_date = message_date.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        time_difference = (now - message.date).total_seconds()
+        time_difference = (now - message_date).total_seconds()
         logging.info(
             f"[TIME CHECK] message.date = {message.date.isoformat()} | "
             f"server_time = {now.isoformat()} | "
@@ -246,7 +231,17 @@ async def check_donor_chats() -> None:
                 break
 
             if last_message:
-                preview = (last_message.text or last_message.caption or "")[:10]
+                text = last_message.text or last_message.caption or ""
+                # Если это часть альбома - подпись может лежать не на этом
+                # конкретном сообщении, а на соседнем с тем же media_group_id.
+                # Забираем весь альбом и ищем текст по всем его сообщениям.
+                if not text and last_message.media_group_id:
+                    media_group = await app.get_media_group(chat_id, last_message.id)
+                    for msg in media_group:
+                        if msg.text or msg.caption:
+                            text = msg.text or msg.caption
+                            break
+                preview = text[:10]
                 logging.info(
                     f"[STARTUP CHECK] chat_id={chat_id}: OK, "
                     f"последнее сообщение id={last_message.id} от {last_message.date.isoformat()} "
@@ -279,19 +274,17 @@ async def check_recipient_chats() -> None:
 
 async def main() -> None:
     async with app:
-        # Без этого Pyrogram не инициализирует локальное состояние обновлений (pts)
-        # по каналам/супергруппам - get_chat_history после этого всё равно работает
-        # (это прямой запрос), а вот live-апдейты в on_message для них молча не приходят.
-        # Для приватных чатов эта синхронизация не нужна.
+        # Разовая проверка при старте: get_chat_history/get_chat работают, даже
+        # если аккаунт НЕ состоит в чате как участник (например, доступ через
+        # админку/публичный юзернейм без вступления) - это прямые запросы.
+        # А live-апдейты в on_message Telegram шлёт только реальным
+        # подписчикам/участникам. Если донор не попал в диалоги аккаунта -
+        # значит, скорее всего, он там не состоит, и live-сообщения оттуда
+        # приходить не будут (историю читать можно всё равно).
         dialog_ids = set()
         async for dialog in app.get_dialogs():
             dialog_ids.add(dialog.chat.id)
 
-        # get_chat_history/get_chat работают даже если аккаунт НЕ состоит в канале
-        # (например, доступ через админку/публичный юзернейм без вступления) - это
-        # прямые запросы. А live-апдейты (on_message) Telegram шлёт только реальным
-        # подписчикам/участникам. Если донор не попал в диалоги - именно поэтому
-        # история читается, а новые сообщения оттуда никогда не долетают.
         for chat_id in donor_chats:
             if chat_id not in dialog_ids:
                 logging.warning(
@@ -306,8 +299,12 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    # app.run() держит соединение и сам переподключается при обрывах связи.
-    # Но если сессия отозвана/невалидна или сеть недоступна намертво - процесс
-    # упадёт уже тут, до входа в handle_message, и это будет видно в самом
-    # начале логов контейнера (docker logs two_bots).
-    app.run(main())
+    # В Kurigram app.run() больше не принимает корутину аргументом (в отличие
+    # от Pyrogram/pyrotgfork) - запускаем main() вручную. asyncio.run() тут не
+    # подходит: он создаёт НОВЫЙ loop, а app (Client) уже привязан к дефолтному
+    # loop'у в момент создания на уровне модуля - отсюда "attached to a
+    # different loop". Используем тот же loop через get_event_loop().
+    # Если сессия отозвана/невалидна или сеть недоступна намертво - процесс
+    # упадёт уже тут, и это будет видно в самом начале логов контейнера
+    # (docker logs two_bots).
+    asyncio.get_event_loop().run_until_complete(main())

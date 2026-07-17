@@ -9,6 +9,7 @@ load_dotenv()
 
 
 async def main(chat_id: int) -> None:
+    """Получение о участниках чата"""
     file_session = str(os.getenv("SESSION"))
     app = Client(file_session)
 
