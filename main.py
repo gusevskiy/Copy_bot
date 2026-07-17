@@ -5,6 +5,7 @@ import os
 from typing import List
 from pyrogram import Client, idle
 from pyrogram.filters import chat
+from pyrogram.handlers import RawUpdateHandler
 from pyrogram.enums import MessageMediaType
 from pyrogram.types import (
     Message,
@@ -46,6 +47,16 @@ app = Client(
 # один и тот же альбом повторно (Pyrogram шлёт по одному update на каждое
 # сообщение альбома). Набор растёт бесконечно и никогда не чистится (см. improvements).
 processed_media_groups = set()
+
+
+# ВРЕМЕННЫЙ диагностический хендлер - логирует ВСЕ сырые апдейты от Telegram,
+# чтобы понять, доходит ли что-то от каналов до клиента на уровне MTProto,
+# или Telegram их вообще не шлёт этому аккаунту. Удалить после диагностики.
+async def raw_update_logger(client: Client, update, users, chats):
+    logging.info(f"[RAW UPDATE] {type(update).__name__}: {update}")
+
+
+app.add_handler(RawUpdateHandler(raw_update_logger), group=-1)
 
 
 async def edit_text_caption(text: str) -> str:
