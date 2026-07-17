@@ -49,10 +49,21 @@ app = Client(
 processed_media_groups = set()
 
 
-# ВРЕМЕННЫЙ диагностический хендлер - логирует ВСЕ сырые апдейты от Telegram,
-# чтобы понять, доходит ли что-то от каналов до клиента на уровне MTProto,
-# или Telegram их вообще не шлёт этому аккаунту. Удалить после диагностики.
+# ВРЕМЕННЫЙ диагностический хендлер - логирует сырые апдейты от Telegram, но
+# только те, что относятся к DONOR-каналам (иначе тонет в апдейтах от ВСЕХ
+# каналов, где вообще состоит аккаунт). Удалить после диагностики.
+# У raw-апдейтов канал приходит как "raw" channel_id (без -100 и минуса) -
+# переводим маркированные Bot-API id из donor_chats в этот формат для сверки.
+DONOR_RAW_CHANNEL_IDS = {
+    -chat_id - 10**12 for chat_id in donor_chats if chat_id <= -1000000000000
+}
+
+
 async def raw_update_logger(client: Client, update, users, chats):
+    channel_id = getattr(getattr(update, "message", None), "peer_id", None)
+    channel_id = getattr(channel_id, "channel_id", None)
+    if channel_id is None or channel_id not in DONOR_RAW_CHANNEL_IDS:
+        return
     logging.info(f"[RAW UPDATE] {type(update).__name__}: {update}")
 
 
