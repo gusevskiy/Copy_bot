@@ -262,7 +262,10 @@ async def check_recipient_chats() -> None:
     то есть может в него постить. Без TOKEN/отдельного бота эта проверка
     делается тем же клиентом, что и check_donor_chats.
     """
-    for chat_id in recipient_chats:
+    # Один и тот же chat_id может повторяться в RECIPIENT несколько раз (если
+    # несколько доноров шлют в один чат) - проверяем каждый только один раз,
+    # иначе Telegram включает rate-limit на повторные подряд запросы.
+    for chat_id in set(recipient_chats):
         try:
             recipient = await app.get_chat(chat_id)
             logging.info(f"[RECIPIENT CHECK] {chat_id}: OK -> {recipient.title or recipient.first_name}")
