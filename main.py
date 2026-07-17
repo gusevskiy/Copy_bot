@@ -261,8 +261,22 @@ async def main() -> None:
         # по каналам/супергруппам - get_chat_history после этого всё равно работает
         # (это прямой запрос), а вот live-апдейты в on_message для них молча не приходят.
         # Для приватных чатов эта синхронизация не нужна.
-        async for _ in app.get_dialogs():
-            pass
+        dialog_ids = set()
+        async for dialog in app.get_dialogs():
+            dialog_ids.add(dialog.chat.id)
+
+        # get_chat_history/get_chat работают даже если аккаунт НЕ состоит в канале
+        # (например, доступ через админку/публичный юзернейм без вступления) - это
+        # прямые запросы. А live-апдейты (on_message) Telegram шлёт только реальным
+        # подписчикам/участникам. Если донор не попал в диалоги - именно поэтому
+        # история читается, а новые сообщения оттуда никогда не долетают.
+        for chat_id in donor_chats:
+            if chat_id not in dialog_ids:
+                logging.warning(
+                    f"[DIALOGS CHECK] chat_id={chat_id}: НЕТ в списке диалогов аккаунта - "
+                    f"скорее всего, аккаунт не состоит в этом чате как участник, "
+                    f"и live-сообщения оттуда приходить не будут (историю читать можно)."
+                )
 
         await check_donor_chats()
         await check_recipient_chats()
